@@ -1,0 +1,343 @@
+---
+title: "Supplement"
+author: "Xiaoyang Li"
+date: "2020/11/29"
+output: 
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+
+library(tidyverse)
+library(tidytext)
+library(topicmodels)
+library(tm)
+library(wordcloud)
+library(maptpx)
+library(igraph)
+library(maptpx)
+library(LDAvis)
+library(lda)
+library(ldatuning)
+library(servr)
+library(quanteda)
+
+library(patchwork)
+```
+
+
+## data
+
+```{r}
+data = read_csv("./data/Clean_Join.csv") %>%  select(-X1, -MCATOT )
+PD_BL = data %>% filter(APPRDX == "PD",
+                        EVENT_ID == "BL") # 423 patients
+
+new = merge(data, PD_BL, by = "PATNO", all = FALSE) [,1:146]
+
+PD_V04 = new %>% filter(EVENT_ID.x == "V04") # 391 patients
+PD_V14 = new %>% filter(EVENT_ID.x == "V14") # 239 patients
+
+PD_V04 = tibble(PD_V04)
+PD_V14 = tibble(PD_V14)
+
+
+# regression
+
+regdata = read_csv("./data/Clean_Join.csv") %>%select(PATNO, EVENT_ID, APPRDX, MCATOT )
+regPD = data %>% filter(APPRDX == "PD",
+                        EVENT_ID == "BL")
+regnew = merge(regdata, regPD, by = "PATNO", all = FALSE) %>%select(PATNO, EVENT_ID.x, MCATOT )
+regnew = na.omit(regnew)
+
+reg_V04 = regnew %>% filter(EVENT_ID.x == "V04") # 365 patients
+reg_V04 = merge(PD_V04, reg_V04) %>%select(PATNO,EVENT_ID.x, APPRDX.x, MCATOT ) %>% tibble()
+PD_V04 = merge(PD_V04, reg_V04) %>%select(-MCATOT, -APPRDX.x, -PRIMDIAG.x ) %>% tibble()
+
+reg_V14 = regnew %>% filter(EVENT_ID.x == "V14") # 234 patients
+reg_V14 = merge(PD_V14, reg_V14) %>%select(PATNO, EVENT_ID.x, APPRDX.x, MCATOT ) %>% tibble()
+PD_V14 =  merge(PD_V14, reg_V14) %>%select(- MCATOT, -APPRDX.x, -PRIMDIAG.x ) %>% tibble()
+
+
+# LDA
+V04 = PD_V04 %>% 
+  pivot_longer(HISPLAT.x:mctot.x, names_to = "Variable", values_to = "word") %>% 
+  filter(is.na(word) == FALSE)
+
+V04dfm = V04 %>% group_by(PATNO,word) %>% count() %>% 
+  cast_dfm(PATNO, word, n)
+
+V14 = PD_V14 %>% 
+  pivot_longer(HISPLAT.x:mctot.x, names_to = "Variable", values_to = "word") %>% 
+  filter(is.na(word) == FALSE)
+
+V14dfm = V14 %>% group_by(PATNO,word) %>% count() %>% 
+  cast_dfm(PATNO, word, n)
+
+# UPDRS 
+UPDRS = read_csv(file = "./data/UPDRS.csv") %>% select(-X1)
+UPDRS$updrstot = rowSums(UPDRS[,16:62])
+UPDRS = UPDRS %>% select(updrstot, everything())
+UPDRS_V04 = UPDRS %>% filter(EVENT_ID == "V04") %>% merge(PD_V04, by  = "PATNO") %>%select(updrstot, PATNO, EVENT_ID) %>% na.omit() #359
+UPDRS_V14 = UPDRS %>% filter(EVENT_ID == "V14") %>% merge(PD_V14, by  = "PATNO") %>%select(updrstot, PATNO,EVENT_ID) %>% na.omit() #231
+```
+
+## Supplement
+
+I found that baseline variables are lack of information about MOCA, so I rebuild topic models at V04 and V14 based on the package lda.
+
+**Specify Hyperparameter: alpha and eta**
+
+Hyperparameter alpha controls the shape of the document–topic distribution,  whereas eta controls  the  shape  of  the  topic–word distribution.  A  large alpha leads  to  documents  containing  many topics,  and  a  large eta leads  to  topics  with  many  words.
+
+For  the  symmetrical  prior alpha,  the hyperparameter  is  a  vector  with  the  value  1/K (K is the  number  of  topics, 3).  
+
+The  symmetrical  prior eta has  a  scalar parameter  with  the  value  1/V (V is  the  size  of  the vocabulary, 280)
+
+Refer: Selecting Priors for Latent Dirichlet Allocation
+http://www.saf21.eu/wp-content/uploads/2018/02/Selecting-Priors-for-Latent-Dirichlet-Allocation.pdf
+
+```{r}
+eta = 1/3
+alpha = 1/280
+
+# V04
+
+V04dfmlda = convert(V04dfm, to = "lda")
+
+V04fit = lda.collapsed.gibbs.sampler(V04dfmlda$documents, K= 3, vocab = V04dfmlda$vocab, num.iterations = 1000, alpha  ,eta, initial = NULL, burnin = NULL, compute.log.likelihood = FALSE)
+
+V04docusum = V04fit$document_sums 
+
+V04pre = predictive.distribution(V04fit$document_sums, V04fit$topics, alpha, eta)
+
+
+# V14
+
+V14dfmlda = convert(V14dfm, to = "lda")
+
+V14fit = lda.collapsed.gibbs.sampler(V14dfmlda$documents, K= 3, vocab = V14dfmlda$vocab, num.iterations = 1000, alpha = 0.02 ,eta = 0.02, initial = NULL, burnin = NULL, compute.log.likelihood = FALSE)
+
+
+V14docusum = V14fit$document_sums 
+
+
+## prediction distribution
+V14pre = predictive.distribution(V14fit$document_sums, V14fit$topics, alpha, eta)
+```
+
+```{r include = FALSE}
+## LDAvis
+# V04json = createJSON(phi = t(apply(t(V04fit$topics) + eta, 2, function(x) x/sum(x))), 
+#                    theta = t(apply(V04fit$document_sums + alpha, 2, function(x) x/sum(x))), 
+#                    doc.length = ntoken(V04dfm), 
+#                    vocab = colnames(V04dfm), 
+#                    term.frequency = colSums(V04dfm))
+# serVis(V04json, out.dir = "V04jsonVis", open.browser = TRUE)
+# 
+# V14json = createJSON(phi = t(apply(t(V14fit$topics) + eta, 2, function(x) x/sum(x))), 
+#                    theta = t(apply(V14fit$document_sums + alpha, 2, function(x) x/sum(x))), 
+#                    doc.length = ntoken(V14dfm), 
+#                    vocab = colnames(V14dfm), 
+#                    term.frequency = colSums(V14dfm))
+# serVis(V14json, out.dir = "V14jsonVis", open.browser = TRUE)
+```
+
+### Regression 
+
+Using the weights from the topic model (posterior probability of a patient belonging to each topic) for each patient as covariate to predict follow up outcomes. The weights should be part of the topic model outputs. If we have 3 topics, we only need to include weights for 2 topics. The follow up outcomes will be motor (UPDRS total score) or cognitive symptom scores (Moca or SDMT) at follow up visits
+
+* Using cognitive symptom scores as response
+
+```{r}
+V04prob = t(V04docusum) 
+colnames(V04prob) = c("n1", "n2", "n3")
+V04prob = V04prob %>% as_tibble() %>%
+  mutate(V04p1 = n1 / (n1+n2+n3),
+         V04p2 = n2 / (n1+n2+n3),
+         V04p3 = n3 / (n1+n2+n3))
+reg_V04_ = cbind(reg_V04, V04prob) %>% rename(V04MCATOT = MCATOT)
+
+V14prob = t(V14docusum) 
+colnames(V14prob) = c("n1", "n2", "n3")
+V14prob = V14prob %>% as_tibble() %>%
+  mutate(V14p1 = n1 / (n1+n2+n3),
+         V14p2 = n2 / (n1+n2+n3),
+         V14p3 = n3 / (n1+n2+n3))
+reg_V14_ = cbind(reg_V14, V14prob) %>% rename(V14MCATOT = MCATOT)
+
+reg_com = reg_V04_ %>% merge( reg_V14_, by = "PATNO")
+```
+
+
+Response: cognitive symptom scores (MCATOT) at V04
+Covariate: probability of each V04 topic model 
+
+```{r}
+glm_V04 = glm(V04MCATOT~ V04p1+V04p2, data = reg_V04_)
+summary(glm_V04)
+```
+
+Response: cognitive symptom scores (MCATOT) at V14
+Covariate: probability of each V14 topic model 
+
+```{r}
+glm_V14 = glm(V14MCATOT~ V14p1+V14p2, data = reg_V14_)
+summary(glm_V14)
+```
+
+Response: cognitive symptom scores (MCATOT) at V14
+Covariate: probability of each V04 and V14 topic model 
+
+```{r}
+glm_com = glm(V14MCATOT~ V04p1 +V04p2 + V14p1+V14p2, data = reg_com)
+summary(glm_com)
+```
+
+By using the MCATOT as response, at V04, the higher probability belonging to topic 2 will lead to higher cognitive symptom scores. At V14, the higher probability belonging to topic 3 will lead to higher cognitive symptom scores. And the topic 2 probability from V04 will also influence the response at V14. 
+
+* Using UPDRS score (sum up results from updrs ii and iii. updrs1 include variables related to mental health, too much NA in updrs4) 
+
+```{r}
+reg_V04_ = merge(reg_V04_, UPDRS_V04) %>% rename(V04updrstot = updrstot)
+reg_V14_ = merge(reg_V14_, UPDRS_V14)%>% rename(V14updrstot = updrstot)
+reg_com = merge(reg_V14_, reg_V04_, by = "PATNO")
+```
+
+
+Response: UPDRS score at V04
+Covariate: probability of each V04 topic model 
+
+```{r}
+glm_V04_U = glm(V04updrstot~ V04p1+V04p2, data = reg_V04_)
+summary(glm_V04_U)
+```
+
+
+Response: UPDRS score at V14
+Covariate: probability of each V14 topic model 
+
+```{r}
+glm_V14_U = glm(V14updrstot~ V14p1+V14p2, data = reg_V14_)
+summary(glm_V14_U)
+```
+
+
+Response: UPDRS score at V14
+Covariate: probability of each V04 and V14 topic model 
+
+```{r}
+glm_com_U = glm(V14updrstot~ V04p1 +V04p2 + V14p1 + V14p2, data = reg_com)
+summary(glm_com_U)
+```
+
+By using the UPDRS as response, at V04, the higher probability belonging to topic 2 will lead to lower UPDRS scores. At V14, the higher probability belonging to topic 2 will lead to higher UPDRS scores. And the topic probability from V04 will not influence the response at V14. However, the coefficient of V14p2 is too large. The reason is still unknown.
+
+### Visualize differences between the loadings of the top words in the V04 and V14 topics
+
+(The loadings are the predictive probabilities of a patient belonging to a topic given his/her own symptoms.)
+
+```{r}
+## Loading ?
+V04prob
+V14prob
+
+## topic word
+top.topic.words(V04fit$topics,16)
+top.topic.words(V14fit$topics,16)
+```
+
+Thid top words are selected by their frequency to be assigned to this topic, so there are around 6 the same top word at V04. Therefore, in following visualization, I picked top 16th word.
+
+```{r}
+# v04
+V04topic = t(V04fit$topics) 
+colnames(V04topic) = c("n1", "n2", "n3")
+V04vocab = rownames(V04topic)
+V04topic = V04topic %>% as_tibble() %>% 
+  cbind(V04vocab) 
+
+## topic1
+V04topic1 =V04topic %>% arrange(desc(n1))
+V04topic1 = V04topic1[1:16,] %>%
+  mutate(V04vocab = forcats::fct_reorder(V04vocab,n1)) %>% 
+  pivot_longer(n1:n3,names_to = "topic", values_to = "n")
+  
+V04plot1 = ggplot(V04topic1, aes(V04vocab,n, fill = topic )) +
+  geom_bar(stat = "identity", position = "fill")+
+  coord_flip() +
+  labs(title = "V04 Topic 1 top word",
+       y = "Probability the word assigned to a topic")
+
+## topic2
+V04topic2 =V04topic %>% arrange(desc(n2))
+V04topic2 = V04topic2[1:16,] %>%
+  mutate(V04vocab = forcats::fct_reorder(V04vocab,n2)) %>% 
+  pivot_longer(n1:n3,names_to = "topic", values_to = "n")
+V04plot2 = ggplot(V04topic2, aes(V04vocab,n, fill = topic )) +
+  geom_bar(stat = "identity", position = "fill")+
+  coord_flip() +
+  labs(title = "V04 Topic 2 top word",
+       y = "Probability the word assigned to a topic")
+
+## topic3
+V04topic3 =V04topic %>% arrange(desc(n3))
+V04topic3 = V04topic3[1:16,] %>%
+  mutate(V04vocab = forcats::fct_reorder(V04vocab,n3)) %>% 
+  pivot_longer(n1:n3,names_to = "topic", values_to = "n")
+V04plot3 = ggplot(V04topic3, aes(V04vocab,n, fill = topic )) +
+  geom_bar(stat = "identity", position = "fill")+
+  coord_flip() +
+  labs(title = "V04 Topic 3 top word",
+       y = "Probability the word assigned to a topic")
+
+
+#v14
+
+V14topic = t(V14fit$topics) 
+colnames(V14topic) = c("n1", "n2", "n3")
+V14vocab = rownames(V14topic)
+V14topic = V14topic %>% as_tibble() %>% 
+  cbind(V14vocab) 
+
+## topic1
+V14topic1 =V14topic %>% arrange(desc(n1))
+V14topic1 = V14topic1[1:16,] %>%
+  mutate(V14vocab = forcats::fct_reorder(V14vocab,n1)) %>% 
+  pivot_longer(n1:n3,names_to = "topic", values_to = "n")
+  
+V14plot1 = ggplot(V14topic1, aes(V14vocab,n, fill = topic )) +
+  geom_bar(stat = "identity", position = "fill")+
+  coord_flip() +
+  labs(title = "V14 Topic 1 top word",
+       y = "Probability the word assigned to a topic")
+
+## topic2
+V14topic2 =V14topic %>% arrange(desc(n2))
+V14topic2 = V14topic2[1:16,] %>%
+  mutate(V14vocab = forcats::fct_reorder(V14vocab,n2)) %>% 
+  pivot_longer(n1:n3,names_to = "topic", values_to = "n")
+V14plot2 = ggplot(V14topic2, aes(V14vocab,n, fill = topic )) +
+  geom_bar(stat = "identity", position = "fill")+
+  coord_flip() +
+  labs(title = "V14 Topic 2 top word",
+       y = "Probability the word assigned to a topic")
+
+## topic3
+V14topic3 =V14topic %>% arrange(desc(n3))
+V14topic3 = V14topic3[1:16,] %>%
+  mutate(V14vocab = forcats::fct_reorder(V14vocab,n3)) %>% 
+  pivot_longer(n1:n3,names_to = "topic", values_to = "n")
+V14plot3 = ggplot(V14topic3, aes(V14vocab,n, fill = topic )) +
+  geom_bar(stat = "identity", position = "fill")+
+  coord_flip() +
+  labs(title = "V14 Topic 3 top word",
+       y = "Probability the word assigned to a topic")
+
+V04plot1/V04plot2/V04plot3
+V14plot1/V14plot2/V14plot3
+```
+
+The assignment probability at V04 is unobvious. But at V14, 3 topics show different dominant words. Top words of topic 2 are mostly motor function related. Both topic 1 and 3 concentrate on STAI and cognitive impairment. But topic one top word show lower STAI score.

@@ -1,0 +1,257 @@
+---
+title: "LDA Summary "
+author: "Xiaoyang Li"
+date: "2020/10/28"
+output: 
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidytext)
+library(topicmodels)
+library(tm)
+library(wordcloud)
+library(maptpx)
+library(igraph)
+library(maptpx)
+library(LDAvis)
+library(lda)
+library(ldatuning)
+library(servr)
+```
+
+## Data import
+
+This dataset includes information:
+
+* Demographic info: APPRDX, HISPLAT, race from PPMI_Original_Cohort_BL_to_Year_5_Dataset_Apr2020.csv
+* Prime Diagnosis from "./data/Study_Enrollment/Primary_Diagnosis.csv" (Seldom info collected at baseline contain prime diagnosis)
+* Olfactory: UPSITBK1, UPSITBK2, UPSITBK3, UPSITBK4 from University_of_Pennsylvania_Smell_ID_Test.csv which means olfactory score from 4 booklet
+* Moca: all related variables from Montreal_Cognitive_Assessment__MoCA_.csv
+* Motor: All related variables from MDS_UPDRS_Part_I.csv, MDS_UPDRS_Part_I__Patient_Questionnaire.csv, MDS_UPDRS_Part_II__Patient_Questionnaire.csv, MDS_UPDRS_Part_III.csv, MDS_UPDRS_Part_IV.csv
+* Stai: all related variables from State-Trait_Anxiety_Inventory.csv
+
+
+```{r}
+data = read_csv("./data/Clean_Join.csv")
+BL = data %>% filter(EVENT_ID == "BL") %>% select(PATNO, EVENT_ID,everything())
+```
+
+## LDA (method = "VEM")
+
+### Prepare DocumentTermMatrix for LDA
+```{r}
+BL = BL %>% select(PATNO, EVENT_ID, everything()) %>% 
+  pivot_longer(APPRDX:mctot, names_to = "Variable", values_to = "word") %>% 
+  filter(is.na(word) == FALSE)
+
+BLcount = BL %>% group_by(PATNO,word) %>% count()
+
+BLdtm = BLcount %>% cast_dtm(PATNO, word, n)
+
+```
+
+### Find suitable k (Topics number)
+
+```{r}
+ldas = c()
+topics = c(2,3,4,5,6,8,10)
+for(topic in topics){
+   start_time = Sys.time()
+   lda = LDA(BLdtm, k = topic, control = list(seed = 2020))
+   ldas = c(ldas,lda)
+   print(paste(topic ,paste("topic(s) and use time is ", Sys.time() -start_time)))
+   save(ldas,file = "ldas_result")
+}
+```
+
+
+```{r}
+load("ldas_result")
+```
+
+Here I use topic numbers as 2,3,4,5,6,8,10 separately.
+
+Firstly, I compare their Perplexity.
+
+```{r}
+
+perplexity = data_frame(k = topics,
+           perplex = map_dbl(ldas, topicmodels::perplexity)) 
+
+perplexity %>%
+  ggplot(aes(k, perplex)) +
+  geom_point() +
+  geom_line() +
+  labs(title = "Evaluating LDA topic models",
+       subtitle = "Optimal number of topics (smaller is better)",
+       x = "Number of topics",
+       y = "Perplexity")
+```
+
+We always prefer the topic model with small Perplexity. However, the result in this case is a little weird. In most cases, when the number of topics increase, the perplexity of corresponding model tend to decrease. Therefore, I use another package `ldatuning` to find the best topic numbers. 
+
+```{r }
+# LDA tuning
+LDAtune = FindTopicsNumber(
+  BLdtm,
+  topics = topics,
+  metrics = c("CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "VEM",
+  control = list(seed = 2020),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+FindTopicsNumber_plot(LDAtune) 
+
+```
+
+This package offer 3 metrics to evaluate lda obtained from "VEM". For "CaoJuan2009" and "Arun2010",  we prefer smaller score. For "Deveaud2014", we prefer larger score. Considering comprehensively, I choose topic numbers = 3, 4, 5 to visualize
+
+```{r}
+BLlda3 = LDA(BLdtm, k = 3, control = list(seed = 2020))
+BLlda4 = LDA(BLdtm, k = 4, control = list(seed = 2020))
+BLlda5 = LDA(BLdtm, k = 5, control = list(seed = 2020))
+```
+
+By using `LDAvis`, I create 3 interactive plot to show the topic model result.
+
+```{r eval = FALSE}
+# prepare to produce json
+topicmodels_json_ldavis = function(fitted, doc_term){
+  require(LDAvis)
+  require(slam)
+  
+  ls_LDA = function (phi)
+  {
+    jensenShannon <- function(x, y) {
+      m <- 0.5 * (x + y)
+      lhs <- ifelse(x == 0, 0, x * (log(x) - log(m+1e-16)))
+      rhs <- ifelse(y == 0, 0, y * (log(y) - log(m+1e-16)))
+      0.5 * sum(lhs) + 0.5 * sum(rhs)
+    }
+    dist.mat <- proxy::dist(x = phi, method = jensenShannon)
+    pca.fit <- stats::cmdscale(dist.mat, k = 2)
+    data.frame(x = pca.fit[, 1], y = pca.fit[, 2])
+  }
+  
+  # Find required quantities
+  phi <- as.matrix(posterior(fitted)$terms)
+  theta <- as.matrix(posterior(fitted)$topics)
+  vocab <- colnames(phi)
+  term_freq <- slam::col_sums(doc_term)
+  
+  # Convert to json
+  json_lda <- LDAvis::createJSON(phi = phi, theta = theta,
+                                 vocab = vocab,
+                                 doc.length = as.vector(table(doc_term$i)),
+                                 term.frequency = term_freq, mds.method = ls_LDA)
+  
+  return(json_lda)
+}
+
+
+json3 = topicmodels_json_ldavis(BLlda3,BLdtm)
+json4 = topicmodels_json_ldavis(BLlda4,BLdtm)
+json5 = topicmodels_json_ldavis(BLlda5,BLdtm)
+
+serVis(json3,open.browser = T)
+serVis(json4,open.browser = T)
+serVis(json5,open.browser = T)
+
+
+
+```
+
+http://127.0.0.1:3454/ LDA model with 3 topics
+
+http://127.0.0.1:3685/ LDA model with 4 topics
+
+http://127.0.0.1:4768/ LDA model with 5 topics
+
+I choose topics number = 3
+
+### k = 3 (BLlda3)
+
+Word-topic probabilities (per-topic-per-word probabilities)
+
+```{r warning=FALSE, message=FALSE}
+topics = tidy(BLlda3, matrix = "beta") 
+topics
+
+topics %>% filter(
+  term == "HC" | term == "PD" |term == "SWEDD"
+) %>% arrange(topic)
+```
+
+
+```{r warning=FALSE, message=FALSE}
+# top terms
+top_term = topics %>% 
+  group_by(topic) %>% 
+  top_n(10, beta) %>% 
+  ungroup() %>% 
+  arrange(topic, -beta)
+
+top_term %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered()
+
+```
+
+Code dictionary
+
+| Topic1 | Code | Meaning |
+  |------:|:-----|---------|
+  |   1   |  NP3KTRMR_0 | Kinetic tremor - Right hand 0-2  | 
+  |   2   |  NP3FACXP_0 |  Facial expression 0-2   |  
+  |   3   |  NP3GAIT_0  |     Gait 0-2   |
+  |   4   |  NP3KTRML_0 |  Kinetic tremor - Left hand 0-2   | 
+  |   5   |  NP3RTARU_0 |  Rest tremor amplitude - RUE 0-2   |  
+  |   6   |  NP3PSTBL_0 |  Postural stability 0-2   |
+  |   7   |  NP3PTRML_0 |  Postural tremor - Left hand 0-2   | 
+  |   8   |  NP4DYSTN_0 |   Painful OFF-state dystonia 0-2   |  
+  |   9   |  STAIAD1_1  |     STAI Question 1 3-4   |
+  |   10  |  NP3POSTR_0 |    Posture 0-2   |  
+  
+  
+  | Topic2 | Code | Meaning |
+  |------:|:-----|---------|
+  |   1   |  DYSKPRES_0 |     Were dyskinesias present 0   | 
+  |   2   |  NP2EAT_0 |   EATING TASKS 0-2   |  
+  |   3   |  NP2SWAL_0 |     CHEWING AND SWALLOWING 0-2   |
+  |   4   |  NP2TRMR_0 |    TREMOR 0-2   | 
+  |   5   |  NP4DYSTN_0 |    Painful OFF-state dystonia 0-2   |  
+  |   6   |  NP3SPCH_0 |     Speech   |
+  |   7   |  NP3RIGRU_0 |   Rigidity - RUE  0-2 | 
+  |   8   |  NP1ANXS_0    |   ANXIOUS MOOD 0-2   |  
+  |   9   |  NP1SLPD_0 |     DAYTIME SLEEPINESS 0-2   |
+  |   10  |  NP1DPRS_0 |    DEPRESSED MOODS 0-2   | 
+  
+  
+  | Topic3 | Code | Meaning |
+  |------:|:-----|---------|
+  |   1   |  NP1CNST_0 |    CONSTIPATION PROBLEMS 0-2   | 
+  |   2   |  NP3FTAPR_0 |   Finger Tapping Right Hand 0-2  |  
+  |   3   |  NP2TURN_0  |     TURNING IN BED 0-2   |
+  |   4   |  NP3FTAPL_0 |   Finger Tapping Left Hand 0-2   | 
+  |   5   |  NP2DRES_0 |   DRESSING 0-2   |  
+  |   6   |  NP2WALK_0 |    WALKING AND BALANCE 0-2    |
+  |   7   |  NP3HMOVL_0 |   Hand movements - Left Hand 0-2     | 
+  |   8   |  NP1APAT_0 |  APATHY 0-2  |  
+  |   9   |  NP1LTHD_0 |  LIGHTHEADEDNESS ON STANDING 0-2   |
+  |   10  |  NP2HWRT_0 |  HANDWRITING 0-2  | 
+  
+Document-topic probabilities (per-document-per-topic probabilities)
+
+```{r}
+docu = tidy(BLlda3, matrix = "gamma")
+docu %>% arrange(desc(gamma))
+```
